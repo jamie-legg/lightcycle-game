@@ -316,6 +316,10 @@ protected:
 	UPROPERTY()
 	float TextureEnd;
 
+	// Material for rendering
+	UPROPERTY()
+	UMaterialInstanceDynamic* RimMaterial;
+
 	void GenerateRimMesh();
 };
 

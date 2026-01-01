@@ -5,6 +5,7 @@
 #include "ArmaCycleMovement.h"
 #include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/Material.h"
 #include "Kismet/GameplayStatics.h"
 #include "UObject/ConstructorHelpers.h"
 
@@ -48,13 +49,30 @@ void AArmaWall::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Create dynamic material instance
+	// Create dynamic material instance - try to load base material first
 	UMaterialInterface* BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Game/Materials/M_Wall_Base"));
+	
+	// Fallback to engine's BasicShapeMaterial which is guaranteed to work and renders properly
+	if (!BaseMaterial)
+	{
+		BaseMaterial = LoadObject<UMaterialInterface>(nullptr, 
+			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	}
+	
+	// Final fallback to engine default material
+	if (!BaseMaterial)
+	{
+		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+	
 	if (BaseMaterial)
 	{
 		WallMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-		WallMesh->SetMaterial(0, WallMaterial);
-		TopGlowMesh->SetMaterial(0, WallMaterial);
+		if (WallMaterial)
+		{
+			WallMesh->SetMaterial(0, WallMaterial);
+			TopGlowMesh->SetMaterial(0, WallMaterial);
+		}
 	}
 }
 
@@ -103,10 +121,12 @@ void AArmaWall::Initialize(AArmaCycle* InOwnerCycle, const FArmaColor& Color)
 	// Initial segment (all dangerous)
 	Segments.Add(FArmaWallSegment(BeginDist, BeginTime, true));
 
-	// Update material color
+	// Update material color - use "Color" parameter for BasicShapeMaterial
 	if (WallMaterial)
 	{
-		WallMaterial->SetVectorParameterValue(TEXT("WallColor"), WallColor.ToLinearColor());
+		FLinearColor WallLinearColor = WallColor.ToLinearColor();
+		WallMaterial->SetVectorParameterValue(TEXT("Color"), WallLinearColor);
+		WallMaterial->SetVectorParameterValue(TEXT("BaseColor"), WallLinearColor);
 	}
 
 	// Generate initial mesh
@@ -287,7 +307,36 @@ void AArmaWall::UpdateMesh()
 	GenerateWallQuad(Vertices, Triangles, Normals, UVs, Colors, BeginPoint, EndPoint, WallHeight, WallThickness);
 
 	// Apply to procedural mesh
+	// Following the original gWall.cpp approach which uses glColor4f for wall coloring
 	WallMesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, TArray<FProcMeshTangent>(), true);
+	
+	// Enable collision for wall interaction
+	WallMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	
+	// Ensure the mesh is visible - set a simple color if no material
+	if (!WallMaterial)
+	{
+		// Create a colored material on the fly using BasicShapeMaterial
+		UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr, 
+			TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+		if (!BaseMat)
+		{
+			BaseMat = UMaterial::GetDefaultMaterial(MD_Surface);
+		}
+		if (BaseMat)
+		{
+			WallMaterial = UMaterialInstanceDynamic::Create(BaseMat, this);
+			WallMesh->SetMaterial(0, WallMaterial);
+		}
+	}
+	
+	// Apply wall color to material - use "Color" parameter for BasicShapeMaterial
+	if (WallMaterial)
+	{
+		FLinearColor WallLinearColor = WallColor.ToLinearColor();
+		WallMaterial->SetVectorParameterValue(TEXT("Color"), WallLinearColor);
+		WallMaterial->SetVectorParameterValue(TEXT("BaseColor"), WallLinearColor);
+	}
 
 	// Generate top glow strip
 	TArray<FVector> GlowVerts;
@@ -438,11 +487,30 @@ AArmaWallRim::AArmaWallRim()
 	RimHeight = 10000.0f;
 	TextureBegin = 0.0f;
 	TextureEnd = 1.0f;
+	RimMaterial = nullptr;
 }
 
 void AArmaWallRim::BeginPlay()
 {
 	Super::BeginPlay();
+	
+	// Create material for rim mesh using BasicShapeMaterial
+	UMaterialInterface* BaseMaterial = LoadObject<UMaterialInterface>(nullptr, 
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
+	if (!BaseMaterial)
+	{
+		BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
+	}
+	if (BaseMaterial)
+	{
+		RimMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
+		if (RimMaterial)
+		{
+			// Dark rim color matching the vertex colors
+			RimMaterial->SetVectorParameterValue(TEXT("Color"), FLinearColor(0.1f, 0.1f, 0.15f, 1.0f));
+			RimMesh->SetMaterial(0, RimMaterial);
+		}
+	}
 }
 
 void AArmaWallRim::Initialize(const FArmaCoord& Start, const FArmaCoord& End, float Height)

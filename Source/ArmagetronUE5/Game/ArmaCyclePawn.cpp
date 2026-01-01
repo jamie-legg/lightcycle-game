@@ -45,27 +45,22 @@ AArmaCyclePawn::AArmaCyclePawn()
 	CycleMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CycleMesh"));
 	CycleMesh->SetupAttachment(RootComponent);
 	
-	// Use cylinder for rounded edges effect (rotated 90 degrees to lie flat)
+	// Use cylinder for rounded edges effect (rotated to point forward)
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
 	if (CylinderMesh.Succeeded())
 	{
 		CycleMesh->SetStaticMesh(CylinderMesh.Object);
 	}
-	// Cylinder default: 100 height along Z, 100 diameter
-	// For a lightcycle, we want the cylinder lying flat, long axis along Y (perpendicular to travel direction)
-	// Pitch 90 degrees to lay the cylinder on its side
-	CycleMesh->SetRelativeRotation(FRotator(90, 0, 0));  // Pitch 90 - lying down, long axis now along Y
-	// After Pitch 90: Original Z-height now points forward (X), original diameter now in Y-Z plane
-	// But we want long axis in Y, so we need to adjust...
-	// Actually use Roll instead: Roll 90 makes Z point to Y
-	CycleMesh->SetRelativeRotation(FRotator(0, 0, 90));  // Roll 90 - long axis (original Z) now along Y
-	// Scale (applied to local axes before rotation):
-	// X,Y = diameter plane (becomes X,Z in world after roll)
-	// Z = height (becomes Y in world after roll)
-	// We want: thin in X (0.3), thin height in Z (0.3), long in Y (1.5)
-	// So scale: X=0.3 (thin front-back), Y=0.3 (thin, becomes world height), Z=1.5 (long, becomes world Y)
-	CycleMesh->SetRelativeScale3D(FVector(0.3f, 0.3f, 1.5f));  // 30 thick, 30 world height, 150 long in Y
-	// Position: lift up so bottom touches ground (after rotation, Y becomes up extent = 0.3*100/2 = 15)
+	// Cylinder default: 100 height along Z, 100 diameter in X-Y plane
+	// We want the cylinder pointing FORWARD (along pawn's X axis) so it faces movement direction
+	// Pitch 90 degrees tilts the Z-axis forward to become the X-axis
+	CycleMesh->SetRelativeRotation(FRotator(90, 0, 0));  // Pitch 90 - cylinder now points forward (+X)
+	// Scale (applied to local axes):
+	// LocalX,Y = diameter plane (thin sides)
+	// LocalZ = height (becomes forward length after rotation)
+	// We want: long forward (1.5), thin sides (0.3), thin height (0.3)
+	CycleMesh->SetRelativeScale3D(FVector(0.3f, 0.3f, 1.5f));  // 30 diameter, 150 long forward
+	// Position: lift up so bottom touches ground (world height = 0.3*100/2 = 15)
 	CycleMesh->SetRelativeLocation(FVector(0, 0, 15));
 	CycleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
@@ -100,6 +95,9 @@ void AArmaCyclePawn::BeginPlay()
 	SpawnTime = GameStartTime;
 	CurrentRubber = MaxRubber;
 	MoveSpeed = BaseSpeed;
+	
+	// Allow immediate first turn after spawn (set LastTurnTime in the past)
+	LastTurnTime = GameStartTime - TurnDelay;
 
 	UE_LOG(LogTemp, Warning, TEXT("BeginPlay: CycleMesh=%s, Location=%s"), 
 		CycleMesh ? TEXT("Valid") : TEXT("NULL"),
@@ -429,6 +427,13 @@ void AArmaCyclePawn::SpawnAmbientLighting()
 void AArmaCyclePawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+	
+	// ========== PROCESS PENDING TURNS (like original gCycleMovement::Timestep) ==========
+	// Execute queued turns when their time has come
+	if (bIsAlive)
+	{
+		ProcessPendingTurns();
+	}
 
 	// ========== IMMEDIATE BOUNDARY ENFORCEMENT ==========
 	// This runs EVERY tick to catch any escaped cycles (failsafe)
@@ -870,9 +875,44 @@ void AArmaCyclePawn::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 	PlayerInputComponent->BindKey(EKeys::MouseScrollDown, IE_Pressed, this, &AArmaCyclePawn::OnZoomOut);
 }
 
-void AArmaCyclePawn::TurnLeft()
+bool AArmaCyclePawn::CanMakeTurn() const
 {
-	if (!bIsAlive || bMenuOpen) return;
+	// ========== TURN DELAY (sg_delayCycle from original Armagetron) ==========
+	// Returns true if enough time has passed since the last turn AND no pending turns
+	float CurrentTime = GetWorld()->GetTimeSeconds();
+	return PendingTurns.Num() == 0 && (CurrentTime - LastTurnTime) >= TurnDelay;
+}
+
+void AArmaCyclePawn::ProcessPendingTurns()
+{
+	// ========== EXECUTE QUEUED TURNS (like original gCycleMovement::Timestep) ==========
+	// Execute pending turns when their time has come
+	if (PendingTurns.Num() > 0)
+	{
+		float CurrentTime = GetWorld()->GetTimeSeconds();
+		float NextTurnTime = LastTurnTime + TurnDelay;
+		
+		if (CurrentTime >= NextTurnTime)
+		{
+			int32 Direction = PendingTurns[0];
+			PendingTurns.RemoveAt(0);
+			
+			// Execute the turn directly (bypassing the queue check)
+			if (Direction < 0)
+			{
+				ExecuteTurnLeft();
+			}
+			else if (Direction > 0)
+			{
+				ExecuteTurnRight();
+			}
+		}
+	}
+}
+
+void AArmaCyclePawn::ExecuteTurnLeft()
+{
+	// Internal function - actually executes the turn (called from queue or directly)
 	
 	// ========== DIGGING MECHANIC (Armagetron advanced technique) ==========
 	// When grinding against a wall, turning INTO the wall is allowed but costs extra rubber
@@ -893,7 +933,7 @@ void AArmaCyclePawn::TurnLeft()
 	// Each turn costs 5% of current speed
 	MoveSpeed *= TurnSpeedFactor;
 	
-	// Record turn time for grace period (allows escaping tight situations via digging)
+	// Record turn time for grace period AND turn delay enforcement
 	LastTurnTime = GetWorld()->GetTimeSeconds();
 
 	FVector OldDir = MoveDirection;
@@ -945,13 +985,40 @@ void AArmaCyclePawn::TurnLeft()
 	// Start new wall segment from current position
 	StartNewWallSegment();
 
-	UE_LOG(LogTemp, Error, TEXT("TURN LEFT: Dir %s -> %s, Pos: %s, TargetYaw: %.1f"), 
+	UE_LOG(LogTemp, Warning, TEXT("TURN LEFT: Dir %s -> %s, Pos: %s, TargetYaw: %.1f"), 
 		*OldDir.ToString(), *MoveDirection.ToString(), *CurrentPos.ToString(), TargetPawnYaw);
 }
 
-void AArmaCyclePawn::TurnRight()
+void AArmaCyclePawn::TurnLeft()
 {
 	if (!bIsAlive || bMenuOpen) return;
+	
+	// ========== TURN QUEUEING (like original gCycleMovement::DoTurn) ==========
+	// If we can turn now, do it immediately. Otherwise queue it.
+	if (CanMakeTurn())
+	{
+		ExecuteTurnLeft();
+	}
+	else
+	{
+		// Queue the turn (up to TurnMemory turns)
+		if (PendingTurns.Num() < TurnMemory)
+		{
+			PendingTurns.Add(-1);  // -1 = left
+			UE_LOG(LogTemp, Verbose, TEXT("TurnLeft queued (%d pending)"), PendingTurns.Num());
+		}
+		else if (PendingTurns.Num() > 0 && PendingTurns.Last() != -1)
+		{
+			// Opposite turns cancel out
+			PendingTurns.Pop();
+			UE_LOG(LogTemp, Verbose, TEXT("TurnLeft cancelled opposite turn (%d pending)"), PendingTurns.Num());
+		}
+	}
+}
+
+void AArmaCyclePawn::ExecuteTurnRight()
+{
+	// Internal function - actually executes the turn (called from queue or directly)
 	
 	// ========== DIGGING MECHANIC (Armagetron advanced technique) ==========
 	// When grinding against a wall, turning INTO the wall is allowed but costs extra rubber
@@ -972,7 +1039,7 @@ void AArmaCyclePawn::TurnRight()
 	// Each turn costs 5% of current speed
 	MoveSpeed *= TurnSpeedFactor;
 	
-	// Record turn time for grace period (allows escaping tight situations via digging)
+	// Record turn time for grace period AND turn delay enforcement
 	LastTurnTime = GetWorld()->GetTimeSeconds();
 
 	FVector OldDir = MoveDirection;
@@ -1024,8 +1091,35 @@ void AArmaCyclePawn::TurnRight()
 	// Start new wall segment from current position
 	StartNewWallSegment();
 
-	UE_LOG(LogTemp, Error, TEXT("TURN RIGHT: Dir %s -> %s, Pos: %s, TargetYaw: %.1f"), 
+	UE_LOG(LogTemp, Warning, TEXT("TURN RIGHT: Dir %s -> %s, Pos: %s, TargetYaw: %.1f"), 
 		*OldDir.ToString(), *MoveDirection.ToString(), *CurrentPos.ToString(), TargetPawnYaw);
+}
+
+void AArmaCyclePawn::TurnRight()
+{
+	if (!bIsAlive || bMenuOpen) return;
+	
+	// ========== TURN QUEUEING (like original gCycleMovement::DoTurn) ==========
+	// If we can turn now, do it immediately. Otherwise queue it.
+	if (CanMakeTurn())
+	{
+		ExecuteTurnRight();
+	}
+	else
+	{
+		// Queue the turn (up to TurnMemory turns)
+		if (PendingTurns.Num() < TurnMemory)
+		{
+			PendingTurns.Add(1);  // +1 = right
+			UE_LOG(LogTemp, Verbose, TEXT("TurnRight queued (%d pending)"), PendingTurns.Num());
+		}
+		else if (PendingTurns.Num() > 0 && PendingTurns.Last() != 1)
+		{
+			// Opposite turns cancel out
+			PendingTurns.Pop();
+			UE_LOG(LogTemp, Verbose, TEXT("TurnRight cancelled opposite turn (%d pending)"), PendingTurns.Num());
+		}
+	}
 }
 
 void AArmaCyclePawn::StartNewWallSegment()
@@ -1072,8 +1166,8 @@ void AArmaCyclePawn::CreateCurrentWallActor()
 				MeshComp->SetStaticMesh(CubeMesh);
 			}
 			
-			// Create glowing material using CycleColor (different colors for player/AI)
-			// Try multiple material sources to ensure we get a visible material
+			// Create bright visible material using CycleColor
+			// BasicShapeMaterial uses "Color" as base color (values >1 are clamped, not emissive)
 			UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr,
 				TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 			if (!BaseMat)
@@ -1084,12 +1178,12 @@ void AArmaCyclePawn::CreateCurrentWallActor()
 			if (BaseMat)
 			{
 				CurrentWallMaterial = UMaterialInstanceDynamic::Create(BaseMat, CurrentWallActor);
-				// Use CycleColor with high intensity for glow
-				FLinearColor WallColor = CycleColor * EmissiveStrength;
+				// Use CycleColor directly - bright but not >1 so it renders properly
+				// Make it slightly brighter by boosting toward white
+				FLinearColor WallColor = FLinearColor::LerpUsingHSV(CycleColor, FLinearColor::White, 0.3f);
 				CurrentWallMaterial->SetVectorParameterValue(TEXT("Color"), WallColor);
-				CurrentWallMaterial->SetVectorParameterValue(TEXT("BaseColor"), WallColor);
 				MeshComp->SetMaterial(0, CurrentWallMaterial);
-				UE_LOG(LogTemp, Verbose, TEXT("Wall material created: Color=(%f,%f,%f)"), WallColor.R, WallColor.G, WallColor.B);
+				UE_LOG(LogTemp, Warning, TEXT("Wall material created: Color=(%f,%f,%f)"), WallColor.R, WallColor.G, WallColor.B);
 			}
 			else
 			{
@@ -1176,9 +1270,9 @@ void AArmaCyclePawn::UpdateCurrentWall()
 	
 	FRotator WallRotation = Direction.Rotation();
 	
-	// Scale: X is length, Y is width (thin light trail), Z is height
+	// Scale: X is length, Y is width, Z is height
 	float ScaleX = Length / 100.0f;
-	float ScaleY = 0.03f; // 3 units wide - very thin light trail like original Armagetron
+	float ScaleY = 0.15f; // 15 units wide - visible but still slim light trail
 	float ScaleZ = TrailHeight / 100.0f;
 	
 	CurrentWallActor->SetActorLocation(Center);
@@ -1224,11 +1318,11 @@ AActor* AArmaCyclePawn::SpawnWallSegment(FVector Start, FVector End)
 			
 			// Scale: X is length, Y is width, Z is height
 			float ScaleX = (Length + 10.0f) / 100.0f;  // Smaller overlap
-			float ScaleY = 0.03f; // 3 units - very thin like original Armagetron
+			float ScaleY = 0.15f; // 15 units wide - visible but slim
 			float ScaleZ = TrailHeight / 100.0f;
 			WallActor->SetActorScale3D(FVector(ScaleX, ScaleY, ScaleZ));
 			
-			// Use CycleColor for wall material
+			// Use CycleColor for wall material - bright but properly clamped
 			UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr,
 				TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
 			if (!BaseMat)
@@ -1239,10 +1333,9 @@ AActor* AArmaCyclePawn::SpawnWallSegment(FVector Start, FVector End)
 			if (BaseMat)
 			{
 				UMaterialInstanceDynamic* WallMat = UMaterialInstanceDynamic::Create(BaseMat, WallActor);
-				// High intensity for bloom/glow effect using CycleColor
-				FLinearColor WallColor = CycleColor * EmissiveStrength;
+				// Use CycleColor boosted toward white for visibility
+				FLinearColor WallColor = FLinearColor::LerpUsingHSV(CycleColor, FLinearColor::White, 0.3f);
 				WallMat->SetVectorParameterValue(TEXT("Color"), WallColor);
-				WallMat->SetVectorParameterValue(TEXT("BaseColor"), WallColor);
 				WallMeshComp->SetMaterial(0, WallMat);
 			}
 			
@@ -1600,11 +1693,6 @@ void AArmaCyclePawn::UpdateWallAcceleration(float DeltaTime)
 			DrawDebugLine(World, Start, LeftEnd, LeftDist < NearCycle ? FColor::Green : FColor::White, false, -1.0f, 0, 2.0f);
 			DrawDebugLine(World, Start, RightEnd, RightDist < NearCycle ? FColor::Blue : FColor::White, false, -1.0f, 0, 2.0f);
 			
-			if (TotalAcceleration > 0)
-			{
-				GEngine->AddOnScreenDebugMessage(50, 0.0f, FColor::Green,
-					FString::Printf(TEXT("WALL ACCEL: +%.0f (L:%.0f R:%.0f)"), TotalAcceleration, LeftDist, RightDist));
-			}
 		}
 	}
 }
@@ -1762,6 +1850,12 @@ void AArmaCyclePawn::Respawn()
 	
 	// Set spawn time for invulnerability
 	SpawnTime = GetWorld()->GetTimeSeconds();
+	
+	// Allow immediate first turn after respawn (set LastTurnTime in the past)
+	LastTurnTime = SpawnTime - TurnDelay;
+	
+	// Clear any pending turns from before death
+	PendingTurns.Empty();
 	
 	// Show cycle mesh
 	if (CycleMesh)

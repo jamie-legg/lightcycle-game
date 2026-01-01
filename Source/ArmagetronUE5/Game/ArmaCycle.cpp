@@ -91,13 +91,29 @@ AArmaCycle::AArmaCycle()
 	CycleBodyMesh->SetupAttachment(RootComponent);
 	CycleBodyMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	CycleBodyMesh->SetCollisionProfileName(TEXT("Pawn"));
+	
+	// Apply orientation correction - matching original gCycle.cpp behavior
+	// Original uses: glScalef(.5f,.5f,.5f) and glTranslatef(-1.5,0,0)
+	// The rotation matrix in gCycle.cpp line 4896 shows model front faces +X
+	// The mesh may be imported with front facing +Y, so apply -90 degree yaw correction
+	// This fixes the "horizontal pointing left and right" issue
+	CycleBodyMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
+	CycleBodyMesh->SetRelativeScale3D(FVector(0.5f, 0.5f, 0.5f));
+	CycleBodyMesh->SetRelativeLocation(FVector(-1.5f * 50.0f, 0.0f, 0.0f)); // Scale offset by 50 (UE5 units)
 
-	// Create wheel meshes
+	// Create wheel meshes - positions from original gCycle.cpp
+	// Front wheel: glTranslatef(1.84,0,.43) in original
+	// Rear wheel: glTranslatef(0,0,.73) in original
+	// Note: these offsets are relative to the body mesh after body transforms
 	FrontWheelMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("FrontWheel"));
 	FrontWheelMesh->SetupAttachment(CycleBodyMesh);
+	// Original position: (1.84, 0, .43) - but body has -90 yaw, so adjust X/Y
+	FrontWheelMesh->SetRelativeLocation(FVector(0.0f, 1.84f * 50.0f, 0.43f * 50.0f));
 
 	RearWheelMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("RearWheel"));
 	RearWheelMesh->SetupAttachment(CycleBodyMesh);
+	// Original position: (0, 0, .73)
+	RearWheelMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 0.73f * 50.0f));
 
 	// Create movement component
 	CycleMovement = CreateDefaultSubobject<UArmaCycleMovementComponent>(TEXT("CycleMovement"));

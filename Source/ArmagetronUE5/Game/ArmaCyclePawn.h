@@ -63,6 +63,18 @@ public:
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
 	float SpeedDecayAbove = 0.1f;  // Deceleration toward base speed when fast (sg_speedCycleDecayAbove)
+	
+	// Turn delay (sg_delayCycle from original - minimum time between turns)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
+	float TurnDelay = 0.1f;  // 100ms minimum between turns (sg_delayCycle)
+	
+	// Turn memory - how many turns can be queued (sg_cycleTurnMemory)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
+	int32 TurnMemory = 3;  // Max queued turns (sg_cycleTurnMemory)
+	
+	// Check if a turn is currently allowed
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	bool CanMakeTurn() const;
 
 	// ========== Rubber System ==========
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rubber")
@@ -200,9 +212,21 @@ protected:
 	void SpawnSpark(FVector Location, FVector Normal);
 	void UpdateInvulnerabilityBlink();
 	void ClearAllWalls();
+	// ========== Turn Queue (sg_cycleTurnMemory from original) ==========
+	// Pending turns queue (like original pendingTurns deque)
+	// Values: -1 = left, +1 = right
+	TArray<int32> PendingTurns;
+	
+	// Process any pending turns that are now ready to execute
+	void ProcessPendingTurns();
+	
 	// ========== Input Handlers ==========
 	void TurnLeft();
 	void TurnRight();
+	
+	// Internal turn execution (called directly or from queue)
+	void ExecuteTurnLeft();
+	void ExecuteTurnRight();
 	void OnBrakePressed();
 	void OnBrakeReleased();
 	
