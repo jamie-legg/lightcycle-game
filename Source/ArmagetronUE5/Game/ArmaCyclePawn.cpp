@@ -19,6 +19,7 @@
 #include "Components/PointLightComponent.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/SkyLightComponent.h"
+#include "ProceduralMeshComponent.h"
 
 AArmaCyclePawn::AArmaCyclePawn()
 {
@@ -98,6 +99,7 @@ void AArmaCyclePawn::BeginPlay()
 	
 	// Allow immediate first turn after spawn (set LastTurnTime in the past)
 	LastTurnTime = GameStartTime - TurnDelay;
+	LastTurnPosition = SpawnLocation;  // Initialize turn position for dig mechanic
 
 	UE_LOG(LogTemp, Warning, TEXT("BeginPlay: CycleMesh=%s, Location=%s"), 
 		CycleMesh ? TEXT("Valid") : TEXT("NULL"),
@@ -529,6 +531,7 @@ void AArmaCyclePawn::Tick(float DeltaTime)
 	UArmaWallRegistry* WallRegistry = UArmaWallRegistry::Get(GetWorld());
 	FArmaRegisteredWall HitWallInfo;
 	float ClosestHitDist = MAX_FLT;
+	float WallSide = 0.0f;  // Which side of the wall we're on
 	
 	if (WallRegistry)
 	{
@@ -540,7 +543,8 @@ void AArmaCyclePawn::Tick(float DeltaTime)
 			DesiredMoveDistance + 50.0f, 
 			this,  // Ignore our own recent walls
 			WallGracePeriod, 
-			HitWallInfo
+			HitWallInfo,
+			WallSide  // Get which side of the wall we're on
 		);
 		
 		// Debug logging for collision detection
@@ -560,17 +564,86 @@ void AArmaCyclePawn::Tick(float DeltaTime)
 	
 	DistanceToWall = ClosestHitDist;
 	
-	// ========== MOVEMENT WITH COLLISION RESPONSE ==========
-	float ActualMoveDistance = DesiredMoveDistance;
-	bool bHitWall = (ClosestHitDist < MAX_FLT);
-	
-	// Check if we're in the turn grace period (digging escape window)
+	// Check if we're in the turn grace period (needed for wall side tracking)
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	bool bInTurnGrace = (CurrentTime - LastTurnTime) < TurnGracePeriod;
 	
-	// During turn grace period, use a much smaller minimum distance
-	// This allows the "dig" mechanic where you can turn into a wall and escape
-	float EffectiveMinDistance = bInTurnGrace ? 0.1f : MinWallDistance;
+	// ========== WALL SIDE TRACKING (prevent going through walls) ==========
+	// Track which side of the wall we're on to prevent crossing through when turning quickly
+	bool bHitWall = (ClosestHitDist < MAX_FLT);
+	
+	if (bHitWall && HitWallInfo.WallID != 0)
+	{
+		// If we're tracking a different wall, update our side tracking
+		if (CurrentWallID != HitWallInfo.WallID)
+		{
+			CurrentWallID = HitWallInfo.WallID;
+			CurrentWallSide = WallSide;
+		}
+		else
+		{
+			// Same wall - check if we're trying to cross to the other side
+			// If side signs are different, we're crossing through the wall
+			bool bCrossingWall = (CurrentWallSide * WallSide < 0.0f);
+			
+			if (bCrossingWall && IsVulnerable() && !bInTurnGrace)
+			{
+				// Trying to go through the wall - prevent it unless invulnerable or in turn grace
+				UE_LOG(LogTemp, Warning, TEXT("BLOCKED: Trying to cross through wall %d (side %.1f -> %.1f)"), 
+					HitWallInfo.WallID, CurrentWallSide, WallSide);
+				
+				// Block movement - treat as wall collision
+				ClosestHitDist = 0.0f;
+				bHitWall = true;
+			}
+			else
+			{
+				// Update side tracking (we're staying on same side or allowed to cross)
+				CurrentWallSide = WallSide;
+			}
+		}
+	}
+	else if (!bHitWall)
+	{
+		// No wall hit - clear side tracking
+		CurrentWallID = 0;
+		CurrentWallSide = 0.0f;
+	}
+	
+	// ========== MOVEMENT WITH COLLISION RESPONSE ==========
+	float ActualMoveDistance = DesiredMoveDistance;
+	
+	// bInTurnGrace already calculated above for wall side tracking
+	
+	// ========== PERFECT TURN PROTECTION (sg_rubberCycleMinAdjust from original) ==========
+	// When adjusting to a wall after a turn, allow getting closer by at least RubberMinAdjust percentage
+	// Formula from original: maxStop = (distSinceLastTurn + space) * (1 - sg_rubberCycleMinAdjust)
+	// This is the key mechanic for "digging" - right after a turn, minimum distance is drastically reduced
+	float DistSinceTurn = GetDistanceSinceLastTurn();
+	float EffectiveMinDistance;
+	
+	if (bInTurnGrace || DistSinceTurn < 50.0f)  // Within 50 units of last turn = recently turned
+	{
+		// Calculate dynamic minimum distance based on distance since last turn
+		// The closer we are to the turn point, the closer we're allowed to get to walls
+		// This is the "dig" mechanic - perfect turns let you squeeze through tiny gaps
+		float MaxStop = (DistSinceTurn + ClosestHitDist) * (1.0f - RubberMinAdjust);
+		EffectiveMinDistance = FMath::Max(0.1f, FMath::Min(MaxStop, MinWallDistance));
+		
+		// For VERY recent turns (within first few units), give extra leniency
+		// This handles the "pixel perfect" case where you turn exactly at the wall
+		if (DistSinceTurn < 5.0f)
+		{
+			EffectiveMinDistance = 0.01f;  // Almost no minimum - you just turned into this!
+			UE_LOG(LogTemp, Verbose, TEXT("PERFECT TURN PROTECTION: DistSinceTurn=%.1f, EffMinDist=%.3f"), 
+				DistSinceTurn, EffectiveMinDistance);
+		}
+	}
+	else
+	{
+		// Normal operation - use standard minimum distance
+		EffectiveMinDistance = MinWallDistance;
+	}
 	
 	// Would we hit a wall this frame?
 	if (bHitWall && ClosestHitDist < DesiredMoveDistance + EffectiveMinDistance)
@@ -712,9 +785,10 @@ void AArmaCyclePawn::Tick(float DeltaTime)
 		
 		for (const FVector2D& CheckDir : Directions)
 		{
+			float DummySide = 0.0f;
 			float NearbyDist = WallRegistry->RaycastWalls(
 				FinalPos2D, CheckDir, MinWallDistance * 2.0f, 
-				this, WallGracePeriod, NearbyWall);
+				this, WallGracePeriod, NearbyWall, DummySide);
 			
 			if (NearbyDist < MinWallDistance && NearbyWall.WallType != EArmaWallType::Cycle)
 			{
@@ -826,9 +900,9 @@ void AArmaCyclePawn::DrawHUD()
 		GEngine->AddOnScreenDebugMessage(3, 0.0f, FColor::White,
 			FString::Printf(TEXT("Wall Dist: %.0f | Walls: %d"), DistanceToWall, WallCount));
 		
-		// Controls
+		// Controls (show triple bindings)
 		GEngine->AddOnScreenDebugMessage(4, 0.0f, StatusColor,
-			FString::Printf(TEXT("Status: %s | A/D: Turn | Mouse: Look | Scroll: Zoom"), *StatusStr));
+			FString::Printf(TEXT("Status: %s | Turn: S/D/F=Left J/K/L=Right | Mouse: Look | Scroll: Zoom"), *StatusStr));
 		
 		// Death message
 		if (!bIsAlive)
@@ -842,11 +916,19 @@ void AArmaCyclePawn::SetupPlayerInputComponent(UInputComponent* PlayerInputCompo
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
-	// Turn controls - direct key binding only
+	// Turn controls - direct key binding with triple bindings for successive input testing
+	// Left turn: A, Left Arrow, and S/D/F triplet
 	PlayerInputComponent->BindKey(EKeys::A, IE_Pressed, this, &AArmaCyclePawn::TurnLeft);
-	PlayerInputComponent->BindKey(EKeys::D, IE_Pressed, this, &AArmaCyclePawn::TurnRight);
 	PlayerInputComponent->BindKey(EKeys::Left, IE_Pressed, this, &AArmaCyclePawn::TurnLeft);
+	PlayerInputComponent->BindKey(EKeys::S, IE_Pressed, this, &AArmaCyclePawn::TurnLeft);
+	PlayerInputComponent->BindKey(EKeys::D, IE_Pressed, this, &AArmaCyclePawn::TurnLeft);
+	PlayerInputComponent->BindKey(EKeys::F, IE_Pressed, this, &AArmaCyclePawn::TurnLeft);
+	
+	// Right turn: L, Right Arrow, and J/K/L triplet  
 	PlayerInputComponent->BindKey(EKeys::Right, IE_Pressed, this, &AArmaCyclePawn::TurnRight);
+	PlayerInputComponent->BindKey(EKeys::J, IE_Pressed, this, &AArmaCyclePawn::TurnRight);
+	PlayerInputComponent->BindKey(EKeys::K, IE_Pressed, this, &AArmaCyclePawn::TurnRight);
+	PlayerInputComponent->BindKey(EKeys::L, IE_Pressed, this, &AArmaCyclePawn::TurnRight);
 
 	// Brake
 	PlayerInputComponent->BindKey(EKeys::SpaceBar, IE_Pressed, this, &AArmaCyclePawn::OnBrakePressed);
@@ -933,8 +1015,9 @@ void AArmaCyclePawn::ExecuteTurnLeft()
 	// Each turn costs 5% of current speed
 	MoveSpeed *= TurnSpeedFactor;
 	
-	// Record turn time for grace period AND turn delay enforcement
+	// Record turn time AND position for grace period and dig mechanic
 	LastTurnTime = GetWorld()->GetTimeSeconds();
+	LastTurnPosition = GetActorLocation();
 
 	FVector OldDir = MoveDirection;
 	FVector CurrentPos = GetActorLocation();
@@ -1039,8 +1122,9 @@ void AArmaCyclePawn::ExecuteTurnRight()
 	// Each turn costs 5% of current speed
 	MoveSpeed *= TurnSpeedFactor;
 	
-	// Record turn time for grace period AND turn delay enforcement
+	// Record turn time AND position for grace period and dig mechanic
 	LastTurnTime = GetWorld()->GetTimeSeconds();
+	LastTurnPosition = GetActorLocation();
 
 	FVector OldDir = MoveDirection;
 	FVector CurrentPos = GetActorLocation();
@@ -1150,50 +1234,41 @@ void AArmaCyclePawn::CreateCurrentWallActor()
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 	
-	CurrentWallActor = World->SpawnActor<AStaticMeshActor>(AStaticMeshActor::StaticClass(), 
+	// Create a simple actor with procedural mesh component (like rim walls)
+	CurrentWallActor = World->SpawnActor<AActor>(AActor::StaticClass(), 
 		CurrentWallStart, FRotator::ZeroRotator, SpawnParams);
 	
 	if (CurrentWallActor)
 	{
-		UStaticMeshComponent* MeshComp = CurrentWallActor->GetStaticMeshComponent();
-		if (MeshComp)
+		// Create procedural mesh component (same approach as rim)
+		UProceduralMeshComponent* ProcMesh = NewObject<UProceduralMeshComponent>(CurrentWallActor, TEXT("WallMesh"));
+		if (ProcMesh)
 		{
-			MeshComp->SetMobility(EComponentMobility::Movable);
+			ProcMesh->SetupAttachment(CurrentWallActor->GetRootComponent());
+			ProcMesh->SetMobility(EComponentMobility::Movable);
+			ProcMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			ProcMesh->SetCastShadow(false);
+			ProcMesh->bReceivesDecals = false;
+			ProcMesh->RegisterComponent();
 			
-			UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-			if (CubeMesh)
-			{
-				MeshComp->SetStaticMesh(CubeMesh);
-			}
-			
-			// Create bright visible material using CycleColor
-			// BasicShapeMaterial uses "Color" as base color (values >1 are clamped, not emissive)
-			UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr,
+			// Create material using BasicShapeMaterial (same as rim)
+			UMaterialInterface* BaseMaterial = LoadObject<UMaterialInterface>(nullptr, 
 				TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-			if (!BaseMat)
+			if (!BaseMaterial)
 			{
-				BaseMat = LoadObject<UMaterialInterface>(nullptr,
-					TEXT("/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"));
+				BaseMaterial = UMaterial::GetDefaultMaterial(MD_Surface);
 			}
-			if (BaseMat)
+			if (BaseMaterial)
 			{
-				CurrentWallMaterial = UMaterialInstanceDynamic::Create(BaseMat, CurrentWallActor);
-				// Use CycleColor directly - bright but not >1 so it renders properly
-				// Make it slightly brighter by boosting toward white
-				FLinearColor WallColor = FLinearColor::LerpUsingHSV(CycleColor, FLinearColor::White, 0.3f);
-				CurrentWallMaterial->SetVectorParameterValue(TEXT("Color"), WallColor);
-				MeshComp->SetMaterial(0, CurrentWallMaterial);
-				UE_LOG(LogTemp, Warning, TEXT("Wall material created: Color=(%f,%f,%f)"), WallColor.R, WallColor.G, WallColor.B);
+				CurrentWallMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, CurrentWallActor);
+				if (CurrentWallMaterial)
+				{
+					FLinearColor WallLinearColor = CycleColor;
+					CurrentWallMaterial->SetVectorParameterValue(TEXT("Color"), WallLinearColor);
+					CurrentWallMaterial->SetVectorParameterValue(TEXT("BaseColor"), WallLinearColor);
+					ProcMesh->SetMaterial(0, CurrentWallMaterial);
+				}
 			}
-			else
-			{
-				UE_LOG(LogTemp, Error, TEXT("CreateCurrentWallActor: Failed to load any material!"));
-			}
-			
-			MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			MeshComp->SetVisibility(true);
-			// Start hidden - will be shown when segment is long enough (prevents cube artifacts)
-			MeshComp->SetHiddenInGame(true);
 		}
 		
 		// Add glow light that follows the wall (uses CycleColor)
@@ -1253,7 +1328,7 @@ void AArmaCyclePawn::UpdateCurrentWall()
 		}
 	}
 	
-	// Hide the wall mesh if it's too short (prevents cube artifacts at corners)
+	// Hide the wall mesh if it's too short (prevents artifacts at corners)
 	const float MinVisibleLength = 10.0f;
 	if (Length < MinVisibleLength)
 	{
@@ -1261,23 +1336,100 @@ void AArmaCyclePawn::UpdateCurrentWall()
 		return;
 	}
 	
-	// Show and update the wall
+	// Show the wall
 	CurrentWallActor->SetActorHiddenInGame(false);
 	
-	// Calculate center and rotation
-	FVector Center = (CurrentWallStart + CurrentPos) / 2.0f;
-	Center.Z = TrailHeight / 2.0f;
+	// Get procedural mesh component
+	UProceduralMeshComponent* ProcMesh = CurrentWallActor->FindComponentByClass<UProceduralMeshComponent>();
+	if (!ProcMesh)
+	{
+		UE_LOG(LogTemp, Error, TEXT("UpdateCurrentWall: No ProceduralMeshComponent!"));
+		return;
+	}
 	
-	FRotator WallRotation = Direction.Rotation();
+	// Generate mesh procedurally (same approach as rim walls)
+	TArray<FVector> Vertices;
+	TArray<int32> Triangles;
+	TArray<FVector> Normals;
+	TArray<FVector2D> UVs;
+	TArray<FLinearColor> Colors;
 	
-	// Scale: X is length, Y is width, Z is height
-	float ScaleX = Length / 100.0f;
-	float ScaleY = 0.15f; // 15 units wide - visible but still slim light trail
-	float ScaleZ = TrailHeight / 100.0f;
+	// Wall dimensions
+	float WallThickness = TrailWidth;
+	float WallHeight = TrailHeight;
 	
-	CurrentWallActor->SetActorLocation(Center);
-	CurrentWallActor->SetActorRotation(WallRotation);
-	CurrentWallActor->SetActorScale3D(FVector(ScaleX, ScaleY, ScaleZ));
+	// Calculate wall direction and perpendicular
+	FVector DirNorm = Direction.GetSafeNormal();
+	FVector Perp = FVector(-DirNorm.Y, DirNorm.X, 0.0f) * (WallThickness * 0.5f);
+	
+	// Start and end points
+	FVector Start = CurrentWallStart;
+	FVector End = CurrentPos;
+	
+	// Create quad vertices (similar to rim wall generation)
+	// Bottom-left, Top-left, Bottom-right, Top-right
+	Vertices.Add(FVector(Start.X + Perp.X, Start.Y + Perp.Y, 0.0f));  // 0: BL
+	Vertices.Add(FVector(Start.X + Perp.X, Start.Y + Perp.Y, WallHeight));  // 1: TL
+	Vertices.Add(FVector(Start.X - Perp.X, Start.Y - Perp.Y, 0.0f));  // 2: BR
+	Vertices.Add(FVector(Start.X - Perp.X, Start.Y - Perp.Y, WallHeight));  // 3: TR
+	
+	Vertices.Add(FVector(End.X + Perp.X, End.Y + Perp.Y, 0.0f));  // 4: BL End
+	Vertices.Add(FVector(End.X + Perp.X, End.Y + Perp.Y, WallHeight));  // 5: TL End
+	Vertices.Add(FVector(End.X - Perp.X, End.Y - Perp.Y, 0.0f));  // 6: BR End
+	Vertices.Add(FVector(End.X - Perp.X, End.Y - Perp.Y, WallHeight));  // 7: TR End
+	
+	// Normals (pointing outward from wall)
+	FVector NormalLeft(Perp.X, Perp.Y, 0.0f);
+	NormalLeft.Normalize();
+	FVector NormalRight(-Perp.X, -Perp.Y, 0.0f);
+	NormalRight.Normalize();
+	
+	// Left side normals
+	Normals.Add(NormalLeft);
+	Normals.Add(NormalLeft);
+	Normals.Add(NormalLeft);
+	Normals.Add(NormalLeft);
+	
+	// Right side normals
+	Normals.Add(NormalRight);
+	Normals.Add(NormalRight);
+	Normals.Add(NormalRight);
+	Normals.Add(NormalRight);
+	
+	// UVs
+	float UVLength = Length / 100.0f;
+	UVs.Add(FVector2D(0, 1));  // 0
+	UVs.Add(FVector2D(0, 0));  // 1
+	UVs.Add(FVector2D(0, 1));  // 2
+	UVs.Add(FVector2D(0, 0));  // 3
+	UVs.Add(FVector2D(UVLength, 1));  // 4
+	UVs.Add(FVector2D(UVLength, 0));  // 5
+	UVs.Add(FVector2D(UVLength, 1));  // 6
+	UVs.Add(FVector2D(UVLength, 0));  // 7
+	
+	// Colors (use cycle color)
+	FLinearColor WallColor = CycleColor;
+	for (int32 i = 0; i < 8; i++)
+	{
+		Colors.Add(WallColor);
+	}
+	
+	// Triangles for left side
+	Triangles.Add(0); Triangles.Add(1); Triangles.Add(4);
+	Triangles.Add(4); Triangles.Add(1); Triangles.Add(5);
+	
+	// Triangles for right side
+	Triangles.Add(2); Triangles.Add(6); Triangles.Add(3);
+	Triangles.Add(3); Triangles.Add(6); Triangles.Add(7);
+	
+	// Create/update mesh section
+	ProcMesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, TArray<FProcMeshTangent>(), true);
+	
+	// Ensure material is set
+	if (CurrentWallMaterial)
+	{
+		ProcMesh->SetMaterial(0, CurrentWallMaterial);
+	}
 }
 
 AActor* AArmaCyclePawn::SpawnWallSegment(FVector Start, FVector End)
@@ -1318,26 +1470,22 @@ AActor* AArmaCyclePawn::SpawnWallSegment(FVector Start, FVector End)
 			
 			// Scale: X is length, Y is width, Z is height
 			float ScaleX = (Length + 10.0f) / 100.0f;  // Smaller overlap
-			float ScaleY = 0.15f; // 15 units wide - visible but slim
+			float ScaleY = 0.5f; // 50 units wide - VERY visible for debugging
 			float ScaleZ = TrailHeight / 100.0f;
 			WallActor->SetActorScale3D(FVector(ScaleX, ScaleY, ScaleZ));
 			
-			// Use CycleColor for wall material - bright but properly clamped
-			UMaterialInterface* BaseMat = LoadObject<UMaterialInterface>(nullptr,
-				TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-			if (!BaseMat)
+			// SIMPLE APPROACH: Use default material which always renders
+			UMaterial* DefaultMat = UMaterial::GetDefaultMaterial(MD_Surface);
+			if (DefaultMat)
 			{
-				BaseMat = LoadObject<UMaterialInterface>(nullptr,
-					TEXT("/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial"));
-			}
-			if (BaseMat)
-			{
-				UMaterialInstanceDynamic* WallMat = UMaterialInstanceDynamic::Create(BaseMat, WallActor);
-				// Use CycleColor boosted toward white for visibility
-				FLinearColor WallColor = FLinearColor::LerpUsingHSV(CycleColor, FLinearColor::White, 0.3f);
-				WallMat->SetVectorParameterValue(TEXT("Color"), WallColor);
+				UMaterialInstanceDynamic* WallMat = UMaterialInstanceDynamic::Create(DefaultMat, WallActor);
+				WallMat->SetVectorParameterValue(TEXT("BaseColor"), CycleColor);
 				WallMeshComp->SetMaterial(0, WallMat);
 			}
+			
+			// Force simple rendering
+			WallMeshComp->SetCastShadow(false);
+			WallMeshComp->bReceivesDecals = false;
 			
 			// Enable collision so cycle can't pass through
 			WallMeshComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
@@ -1436,6 +1584,15 @@ bool AArmaCyclePawn::IsVulnerable() const
 	
 	float CurrentTime = GetWorld()->GetTimeSeconds();
 	return (CurrentTime - SpawnTime) > SpawnInvulnerabilityTime;
+}
+
+float AArmaCyclePawn::GetDistanceSinceLastTurn() const
+{
+	// Calculate how far we've traveled since the last turn (like original gCycleMovement)
+	// This is used for the "dig" mechanic - the closer we are to the last turn, 
+	// the closer we're allowed to get to walls
+	FVector Delta = GetActorLocation() - LastTurnPosition;
+	return Delta.Size();
 }
 
 float AArmaCyclePawn::GetDistanceToNearestWall(FVector Direction) const
@@ -1782,7 +1939,7 @@ void AArmaCyclePawn::Die()
 	// Finalize current wall with collision
 	if (CurrentWallActor)
 	{
-		UStaticMeshComponent* WallMesh = CurrentWallActor->GetStaticMeshComponent();
+		UProceduralMeshComponent* WallMesh = CurrentWallActor->FindComponentByClass<UProceduralMeshComponent>();
 		if (WallMesh)
 		{
 			WallMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);

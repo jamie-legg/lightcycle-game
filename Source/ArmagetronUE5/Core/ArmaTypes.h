@@ -119,6 +119,8 @@ struct ARMAGETRONUE5_API FArmaColor
 	FLinearColor ToLinearColor(float Alpha = 1.0f) const { return FLinearColor(R, G, B, Alpha); }
 	FColor ToFColor(uint8 Alpha = 255) const { return FColor(R * 255, G * 255, B * 255, Alpha); }
 
+	FString ToString() const { return FString::Printf(TEXT("(R=%.3f,G=%.3f,B=%.3f)"), R, G, B); }
+
 	// Predefined cycle colors (from original game)
 	static const FArmaColor Red;
 	static const FArmaColor Blue;

@@ -249,7 +249,8 @@ FArmaAISensorData AArmaAICycle::CastSensor(FVector Direction, float Range)
 	if (WallRegistry)
 	{
 		FArmaRegisteredWall HitWall;
-		float HitDist = WallRegistry->RaycastWalls(MyPos2D, Dir2D, Range, this, WallGracePeriod, HitWall);
+		float DummySide = 0.0f;
+		float HitDist = WallRegistry->RaycastWalls(MyPos2D, Dir2D, Range, this, WallGracePeriod, HitWall, DummySide);
 		
 		if (HitDist < MAX_FLT)
 		{

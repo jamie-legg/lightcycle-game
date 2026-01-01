@@ -187,7 +187,7 @@ void UArmaWallRegistry::SpawnArenaRim(float HalfWidth, float HalfHeight, float W
 }
 
 float UArmaWallRegistry::RaycastWalls(FVector2D Origin, FVector2D Direction, float MaxDistance,
-	AActor* IgnoreOwner, float GraceTime, FArmaRegisteredWall& OutHitWall) const
+	AActor* IgnoreOwner, float GraceTime, FArmaRegisteredWall& OutHitWall, float& OutSide) const
 {
 	float ClosestDist = MAX_FLT;
 	float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
@@ -254,6 +254,9 @@ float UArmaWallRegistry::RaycastWalls(FVector2D Origin, FVector2D Direction, flo
 					}
 					ClosestDist = DotToStart;
 					OutHitWall = Wall;
+					// For parallel case, calculate side from perpendicular distance
+					// Reuse the WallDir and WallNormal calculated earlier
+					OutSide = FVector2D::DotProduct(ToStart, WallNormal);
 				}
 			}
 			continue;
@@ -279,6 +282,7 @@ float UArmaWallRegistry::RaycastWalls(FVector2D Origin, FVector2D Direction, flo
 			{
 				ClosestDist = t;
 				OutHitWall = Wall;
+				OutSide = SideCheck;  // Store which side of the wall we're on
 			}
 		}
 	}

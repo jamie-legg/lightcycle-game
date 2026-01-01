@@ -12,6 +12,7 @@ class UStaticMeshComponent;
 class UBoxComponent;
 class UPointLightComponent;
 class UMaterialInstanceDynamic;
+class UProceduralMeshComponent;
 
 /**
  * AArmaCyclePawn - Snake/Armagetron style movement with glowing trails
@@ -101,12 +102,35 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Rubber")
 	float DistanceToWall = 9999.0f;
 	
+	// Track which side of the wall we're on (positive = one side, negative = other side)
+	// Used to prevent going through walls when turning quickly alongside them
+	UPROPERTY(BlueprintReadOnly, Category = "Rubber")
+	float CurrentWallSide = 0.0f;  // Side of the wall we're currently on (from last collision check)
+	
+	UPROPERTY(BlueprintReadOnly, Category = "Rubber")
+	int32 CurrentWallID = 0;  // ID of the wall we're tracking side for
+	
 	// Grace period after turn to allow escaping tight situations (digging mechanic)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rubber")
 	float TurnGracePeriod = 0.15f;  // Time after turn where collision is relaxed
 	
 	UPROPERTY(BlueprintReadOnly, Category = "Rubber")
 	float LastTurnTime = 0.0f;  // Time of last turn for grace period
+	
+	// ========== Perfect Turn Protection (sg_rubberCycleMinAdjust from original) ==========
+	// When adjusting to a wall after a turn, allow getting closer by at least this percentage
+	// This is the key mechanic for "digging" - right after a turn, minimum distance is reduced
+	// Formula: maxStop = (distSinceLastTurn + space) * (1 - MinAdjust)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rubber")
+	float RubberMinAdjust = 0.05f;  // sg_rubberCycleMinAdjust - 5% means we can get 5% closer after turning
+	
+	// Track position at last turn for calculating distance
+	UPROPERTY(BlueprintReadOnly, Category = "Rubber")
+	FVector LastTurnPosition = FVector::ZeroVector;
+	
+	// Get distance traveled since last turn
+	UFUNCTION(BlueprintCallable, Category = "Rubber")
+	float GetDistanceSinceLastTurn() const;
 	
 	// ========== Digging/Gap System (Armagetron advanced mechanic) ==========
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Digging")
@@ -161,7 +185,7 @@ public:
 	float TrailHeight = 150.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals")
-	float TrailWidth = 3.0f;  // Thin light trails like original Armagetron
+	float TrailWidth = 15.0f;  // Wall thickness - increased to prevent going through walls
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Visuals")
 	float EmissiveStrength = 20.0f;
@@ -256,8 +280,9 @@ protected:
 	TArray<FWallSegment> WallSegments;
 	
 	// The currently growing wall segment (updated every frame)
+	// Uses procedural mesh component (like rim walls) for proper rendering
 	UPROPERTY()
-	class AStaticMeshActor* CurrentWallActor;
+	class AActor* CurrentWallActor;
 	
 	UPROPERTY()
 	UMaterialInstanceDynamic* CurrentWallMaterial;
@@ -266,8 +291,7 @@ protected:
 	float GameStartTime;
 	int32 WallCount = 0;
 	
-	// ID of current growing wall in the global registry
-	int32 CurrentWallID = 0;
+	// ID of current growing wall in the global registry (declared above in Rubber section)
 	
 	void StartNewWallSegment();
 	void UpdateCurrentWall();

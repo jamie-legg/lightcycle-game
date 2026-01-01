@@ -84,6 +84,12 @@ void AArmaWall::Tick(float DeltaTime)
 	if (!bFinalized && OwnerCycle.IsValid())
 	{
 		UpdateMesh();
+		UE_LOG(LogTemp, Warning, TEXT("WallMesh=%s TopGlowMesh=%s BaseMat=%s"),
+			*GetNameSafe(WallMesh),
+			*GetNameSafe(TopGlowMesh),
+			*GetNameSafe(WallMaterial));
+		UE_LOG(LogTemp, Warning, TEXT("WallColor=%s"),
+			*WallColor.ToString());
 	}
 }
 

@@ -97,9 +97,10 @@ public:
 
 	// Check for ray-wall intersection, returns closest hit distance
 	// Returns MAX_FLT if no hit
+	// OutSide: Returns which side of the wall we're on (positive = one side, negative = other side)
 	UFUNCTION(BlueprintCallable, Category = "Walls")
 	float RaycastWalls(FVector2D Origin, FVector2D Direction, float MaxDistance, 
-		AActor* IgnoreOwner, float GraceTime, FArmaRegisteredWall& OutHitWall) const;
+		AActor* IgnoreOwner, float GraceTime, FArmaRegisteredWall& OutHitWall, float& OutSide) const;
 
 	// Get distance to nearest wall (for acceleration)
 	UFUNCTION(BlueprintCallable, Category = "Walls")
